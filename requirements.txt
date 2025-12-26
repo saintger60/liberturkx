@@ -1,0 +1,5 @@
+tweepy
+feedparser
+google-generativeai
+python-dateutil
+python-dotenv
