@@ -42,8 +42,8 @@ KURALLAR:
 3. Keskin, eleştirel ve düşündürücü ol.
 4. 'Özetle', 'Gelişme', 'Son dakika' gibi klişeler YASAK.
 5. Emoji kullanma.
-6. ÇOK ÖNEMLİ: Tweet MUTLAKA tamamlanmış bir cümle ile bitmeli. Yarım cümle YASAK.
-7. KISA YAZ: Maximum 240 karakter. Daha uzun yazma."""
+6. ÇOK ÖNEMLİ: Anlam bütünlüğü olan, tamamlanmış cümlelerle yaz. Yarım cümle veya eksik düşünce KESINLIKLE YASAK.
+7. Maximum 270 karakter. Bu limite uy ve düşünceni bu sınır içinde tamamla."""
 
 
 def load_history():
