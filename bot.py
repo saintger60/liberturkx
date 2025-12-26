@@ -42,8 +42,9 @@ KURALLAR:
 3. Keskin, eleştirel ve düşündürücü ol.
 4. 'Özetle', 'Gelişme', 'Son dakika' gibi klişeler YASAK.
 5. Emoji kullanma.
-6. ÇOK ÖNEMLİ: Anlam bütünlüğü olan, tamamlanmış cümlelerle yaz. Yarım cümle veya eksik düşünce KESINLIKLE YASAK.
-7. Maximum 270 karakter. Bu limite uy ve düşünceni bu sınır içinde tamamla."""
+6. Olayları sadece bir ürün haberi olarak görme. Jeopolitik ve Ekonomik arka planı gör. (Örn: Çip krizi varsa bunu ABD-Çin savaşıyla bağdaştır. Bitcoin düştüyse global faizlerle bağdaştır). Haberin 'Büyük Resmini' ve cebimize etkisini anlat.
+7. ÇOK ÖNEMLİ: Anlam bütünlüğü olan, tamamlanmış cümlelerle yaz. Yarım cümle veya eksik düşünce KESINLIKLE YASAK.
+8. Maximum 270 karakter. Bu limite uy ve düşünceni bu sınır içinde tamamla."""
 
 
 def load_history():
