@@ -34,17 +34,47 @@ RSS_FEEDS = [
 HISTORY_FILE = "history.json"
 
 # Persona System Prompt
-PERSONA_PROMPT = """Sen '@LiberturkX'sin. Teknoloji, finans ve kripto dünyasını yakından takip eden keskin bir yorumcusun.
-GÖREV: Bu haberi oku ve kendi görüşünü net şekilde ifade et.
-KURALLAR:
-1. Sade ve anlaşılır Türkçe kullan.
-2. Haberin ne hakkında olduğunu MUTLAKA belirt.
-3. Keskin, eleştirel ve düşündürücü ol.
-4. 'Özetle', 'Gelişme', 'Son dakika' gibi klişeler YASAK.
-5. Emoji kullanma.
-6. Olayları sadece bir ürün haberi olarak görme. Jeopolitik ve Ekonomik arka planı gör. (Örn: Çip krizi varsa bunu ABD-Çin savaşıyla bağdaştır. Bitcoin düştüyse global faizlerle bağdaştır). Haberin 'Büyük Resmini' ve cebimize etkisini anlat.
-7. ÇOK ÖNEMLİ: Anlam bütünlüğü olan, tamamlanmış cümlelerle yaz. Yarım cümle veya eksik düşünce KESINLIKLE YASAK.
-8. Maximum 270 karakter. Bu limite uy ve düşünceni bu sınır içinde tamamla."""
+PERSONA_PROMPT = """Sen 'Liber Turk'sun. Dijital bir istihbarat subayısın (Teşkilat-ı Mahsusa ruhuyla).
+
+---
+ADIM 1: FİLTRELEME (KRİTİK)
+Önce haberi analiz et. Aşağıdaki konulardaysa SADECE 'NONE' yaz, başka hiçbir şey yazma:
+- Spesifik ürün indirimleri (Black Friday, Prime Day, vb.)
+- Video oyunu yamaları veya güncellemeleri
+- Küçük çaplı gadget lansmanları
+- ABD'ye özgü yerel haberler
+- Eğlence/magazin haberleri
+
+SADECE şu konularda tweet at:
+- Makro-ekonomi (Fed, ECB, faiz, enflasyon)
+- Büyük teknoloji şirketlerinin stratejik hamleleri (Apple, Google, Nvidia, Microsoft hisse/strateji)
+- Yapay zeka regülasyonları
+- Kripto piyasa hareketleri (Bitcoin, Ethereum, USDT)
+- Teknoloji sektörünü etkileyen jeopolitik gelişmeler
+
+---
+ADIM 2: TÜRKİYE AÇISI (HAYATI ÖNEM)
+Her global haberi Türkiye bağlamına oturt.
+Sor: "Bu gelişme bir Türk'ün alım gücünü, kripto portföyünü veya geleceğini nasıl etkiler?"
+- Fed faiz artırırsa -> Gelişmekte olan piyasalara (TR dahil) etkisini yorumla
+- Petrol yükselirse -> TR'deki enflasyon etkisini belirt
+- Dolar güçlenirse -> TL üzerindeki baskıyı analiz et
+- Çip krizi varsa -> Türkiye'nin teknoloji bağımlılığını sorgula
+
+---
+ADIM 3: ÜSLUP VE STİL
+- Ciddi, analitik, sinik ve 'derin devlet bilen' bir ton
+- Çocuksu argo veya emoji YASAK
+- Şu terimleri kullan: 'likidite krizi', 'küresel sermaye', 'operasyon', 'domino etkisi', 'hedge', 'pozisyon almak', 'manipülasyon'
+- Tamamı küçük harf estetiği (büyük harf kullanma)
+- Klişeler yasak: 'özetle', 'gelişme', 'son dakika'
+
+---
+ADIM 4: FORMAT
+- Maximum 270 karakter
+- Anlam bütünlüğü olan, tamamlanmış cümleler
+- Yarım düşünce YASAK
+- Eğer haber filtrelenecekse SADECE 'NONE' yaz"""
 
 
 def load_history():
@@ -101,7 +131,7 @@ def fetch_rss_feeds():
 
 
 def generate_tweet(title, summary, source):
-    """Generate a persona-driven tweet using Google Gemini."""
+    """Generate a persona-driven tweet using Google Gemini. Returns None if filtered."""
     genai.configure(api_key=GEMINI_API_KEY)
     
     model = genai.GenerativeModel("gemini-3-flash-preview")
@@ -112,17 +142,21 @@ HABER ÖZETİ: {summary}
 
 KAYNAK: {source}
 
-Şimdi bu haberi kendi tarzında yorumla:"""
+Önce filtrele, sonra uygunsa tarzında yorumla:"""
     
     response = model.generate_content(
         [
             {"role": "user", "parts": [PERSONA_PROMPT]},
-            {"role": "model", "parts": ["anladım, hazırım"]},
+            {"role": "model", "parts": ["anladım, filtreleme ve analiz için hazırım"]},
             {"role": "user", "parts": [user_prompt]},
         ]
     )
     
     tweet_text = response.text.strip()
+    
+    # Check if content was filtered
+    if tweet_text.upper() == "NONE" or tweet_text == "" or len(tweet_text) < 10:
+        return None
     
     # Ensure max 280 characters (Twitter limit)
     if len(tweet_text) > 280:
@@ -175,42 +209,51 @@ def main():
         print("❌ No entries found in RSS feeds")
         return
     
-    # Find the latest item not in history
-    new_entry = None
+    # Find a suitable item to tweet (not in history and passes filtering)
+    tweet_posted = False
+    
     for entry in entries:
-        if entry["link"] not in history:
-            new_entry = entry
-            break
-    
-    if not new_entry:
-        print("✅ No new items to post")
-        return
-    
-    print(f"📝 New item found: {new_entry['title']}")
-    
-    # Generate tweet content
-    print("🤖 Generating tweet with Gemini...")
-    tweet_text = generate_tweet(
-        new_entry["title"],
-        new_entry["summary"],
-        new_entry["source"],
-    )
-    print(f"💬 Generated tweet: {tweet_text}")
-    
-    # Post to Twitter
-    print("🐦 Posting to Twitter...")
-    try:
-        response = post_to_twitter(tweet_text)
-        print(f"✅ Tweet posted successfully! ID: {response.data['id']}")
+        if entry["link"] in history:
+            continue
         
-        # Save to history
-        history.append(new_entry["link"])
-        save_history(history)
-        print("💾 History updated")
+        print(f"📝 Checking item: {entry['title']}")
         
-    except Exception as e:
-        print(f"❌ Error posting to Twitter: {e}")
-        return
+        # Generate tweet content (may return None if filtered)
+        print("🤖 Analyzing with Gemini...")
+        tweet_text = generate_tweet(
+            entry["title"],
+            entry["summary"],
+            entry["source"],
+        )
+        
+        # Check if content was filtered
+        if tweet_text is None:
+            print("⏭️ Content filtered (not relevant), adding to history and trying next...")
+            history.append(entry["link"])
+            save_history(history)
+            continue
+        
+        print(f"💬 Generated tweet: {tweet_text}")
+        
+        # Post to Twitter
+        print("🐦 Posting to Twitter...")
+        try:
+            response = post_to_twitter(tweet_text)
+            print(f"✅ Tweet posted successfully! ID: {response.data['id']}")
+            
+            # Save to history
+            history.append(entry["link"])
+            save_history(history)
+            print("💾 History updated")
+            tweet_posted = True
+            break  # Only post one tweet per run
+            
+        except Exception as e:
+            print(f"❌ Error posting to Twitter: {e}")
+            return
+    
+    if not tweet_posted:
+        print("✅ No suitable items to post (all filtered or already posted)")
 
 
 if __name__ == "__main__":
