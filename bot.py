@@ -4,14 +4,19 @@ LiberTurkX - Autonomous Tech News Bot
 Fetches tech/finance/crypto news and posts persona-driven commentary to Twitter.
 """
 
-import os
 import json
+import os
+import re
+import socket
+import sys
+from datetime import datetime, timezone
+
 import feedparser
 import tweepy
-import google.generativeai as genai
-from datetime import datetime
 from dateutil import parser as date_parser
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 # Load environment variables
 load_dotenv()
@@ -27,11 +32,19 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 RSS_FEEDS = [
     "https://techcrunch.com/feed/",
     "https://www.theverge.com/rss/index.xml",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    # Sondaki '/' 308 redirect'e dönüşüyor ve feedparser boş liste alıyor.
+    "https://www.coindesk.com/arc/outboundfeeds/rss",
 ]
 
-# History file path
 HISTORY_FILE = "history.json"
+# Ücretsiz Gemini katmanı model başına günde 20 istekle sınırlı (Pasifik gece
+# yarısında sıfırlanır); tavan olmadan tek tur tüm günlük kotayı tüketebilir.
+MAX_GEMINI_CALLS_PER_RUN = 3
+HISTORY_MAX_ENTRIES = 1000
+# Preview modeller 2 hafta bildirimle emekli edilebiliyor; stable modelde kal.
+GEMINI_MODEL = "gemini-3.5-flash"
+TWEET_MAX_CHARS = 270
+FEED_TIMEOUT_SECONDS = 20
 
 # Persona System Prompt
 PERSONA_PROMPT = """Sen 'Liber Turk'sun. Dijital bir istihbarat subayısın (Teşkilat-ı Mahsusa ruhuyla).
@@ -86,56 +99,85 @@ def load_history():
 
 
 def save_history(history):
-    """Save posting history to JSON file."""
+    """Save posting history to JSON file, keeping only the newest entries."""
+    trimmed = history[-HISTORY_MAX_ENTRIES:]
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+        json.dump(trimmed, f, ensure_ascii=False, indent=2)
+
+
+def parse_entry_date(entry):
+    """Return a timezone-aware publication date for a feed entry."""
+    for attr in ("published", "updated"):
+        raw = getattr(entry, attr, None)
+        if not raw:
+            continue
+        try:
+            parsed = date_parser.parse(raw)
+        except (ValueError, OverflowError):
+            continue
+        # Naive ve aware tarihler karışırsa sort TypeError fırlatır; hepsini aware yap.
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return datetime.now(timezone.utc)
 
 
 def fetch_rss_feeds():
     """Fetch and parse all RSS feeds, return sorted entries by date."""
     all_entries = []
-    
+    socket.setdefaulttimeout(FEED_TIMEOUT_SECONDS)
+
     for feed_url in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_url)
+            if not feed.entries:
+                status = getattr(feed, "status", "?")
+                print(f"⚠️ Feed returned no entries (status {status}): {feed_url}")
             for entry in feed.entries:
-                # Parse publication date
-                pub_date = None
-                if hasattr(entry, "published"):
-                    pub_date = date_parser.parse(entry.published)
-                elif hasattr(entry, "updated"):
-                    pub_date = date_parser.parse(entry.updated)
-                else:
-                    pub_date = datetime.now()
-                
-                # Get summary/description
-                summary = ""
-                if hasattr(entry, "summary"):
-                    summary = entry.summary
-                elif hasattr(entry, "description"):
-                    summary = entry.description
-                
-                all_entries.append({
-                    "title": entry.title,
-                    "link": entry.link,
-                    "summary": summary[:500],  # Limit summary length
-                    "source": feed_url,
-                    "pub_date": pub_date,
-                })
+                try:
+                    summary = ""
+                    if hasattr(entry, "summary"):
+                        summary = entry.summary
+                    elif hasattr(entry, "description"):
+                        summary = entry.description
+
+                    all_entries.append({
+                        "title": entry.title,
+                        "link": entry.link,
+                        "summary": summary[:500],  # Limit summary length
+                        "source": feed_url,
+                        "pub_date": parse_entry_date(entry),
+                    })
+                except Exception as e:
+                    print(f"Skipping malformed entry in {feed_url}: {e}")
         except Exception as e:
             print(f"Error fetching {feed_url}: {e}")
-    
+
     # Sort by publication date (newest first)
     all_entries.sort(key=lambda x: x["pub_date"], reverse=True)
     return all_entries
 
 
-def generate_tweet(title, summary, source):
-    """Generate a persona-driven tweet using Google Gemini. Returns None if filtered."""
-    genai.configure(api_key=GEMINI_API_KEY)
-    
-    model = genai.GenerativeModel("gemini-3-flash-preview")
-    
+def postprocess_tweet(tweet_text):
+    """Normalize Gemini output. Returns None if the item was filtered."""
+    tweet_text = (tweet_text or "").strip()
+
+    # Model 'NONE' cevabını noktalama/tırnak süsleriyle döndürebilir.
+    normalized = re.sub(r"[^a-z]", "", tweet_text.lower())
+    if normalized == "none" or len(tweet_text) < 10:
+        return None
+
+    if len(tweet_text) > TWEET_MAX_CHARS:
+        cut = tweet_text[: TWEET_MAX_CHARS - 1]
+        if " " in cut:
+            cut = cut[: cut.rfind(" ")]
+        tweet_text = cut + "…"
+
+    return tweet_text
+
+
+def generate_tweet(client, title, summary, source):
+    """Generate a persona-driven tweet using Gemini. Returns None if filtered."""
     user_prompt = f"""HABER BAŞLIĞI: {title}
 
 HABER ÖZETİ: {summary}
@@ -143,26 +185,14 @@ HABER ÖZETİ: {summary}
 KAYNAK: {source}
 
 Önce filtrele, sonra uygunsa tarzında yorumla:"""
-    
-    response = model.generate_content(
-        [
-            {"role": "user", "parts": [PERSONA_PROMPT]},
-            {"role": "model", "parts": ["anladım, filtreleme ve analiz için hazırım"]},
-            {"role": "user", "parts": [user_prompt]},
-        ]
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(system_instruction=PERSONA_PROMPT),
     )
-    
-    tweet_text = response.text.strip()
-    
-    # Check if content was filtered
-    if tweet_text.upper() == "NONE" or tweet_text == "" or len(tweet_text) < 10:
-        return None
-    
-    # Ensure max 280 characters (Twitter limit)
-    if len(tweet_text) > 280:
-        tweet_text = tweet_text[:277] + "..."
-    
-    return tweet_text
+
+    return postprocess_tweet(response.text)
 
 
 def post_to_twitter(tweet_text):
@@ -173,7 +203,7 @@ def post_to_twitter(tweet_text):
         access_token=TWITTER_ACCESS_TOKEN,
         access_token_secret=TWITTER_ACCESS_SECRET,
     )
-    
+
     response = client.create_tweet(text=tweet_text)
     return response
 
@@ -181,7 +211,7 @@ def post_to_twitter(tweet_text):
 def main():
     """Main bot logic."""
     print("🚀 LiberTurkX Bot Starting...")
-    
+
     # Validate API keys
     required_keys = [
         ("TWITTER_API_KEY", TWITTER_API_KEY),
@@ -190,68 +220,89 @@ def main():
         ("TWITTER_ACCESS_SECRET", TWITTER_ACCESS_SECRET),
         ("GEMINI_API_KEY", GEMINI_API_KEY),
     ]
-    
-    for key_name, key_value in required_keys:
-        if not key_value:
-            print(f"❌ Missing environment variable: {key_name}")
-            return
-    
+
+    missing = [name for name, value in required_keys if not value]
+    if missing:
+        print(f"❌ Missing environment variables: {', '.join(missing)}")
+        sys.exit(1)
+
     # Load history
     history = load_history()
+    history_set = set(history)
     print(f"📜 Loaded {len(history)} items from history")
-    
+
     # Fetch RSS feeds
     print("📡 Fetching RSS feeds...")
     entries = fetch_rss_feeds()
     print(f"📰 Found {len(entries)} news items")
-    
+
     if not entries:
         print("❌ No entries found in RSS feeds")
         return
-    
-    # Find a suitable item to tweet (not in history and passes filtering)
+
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    gemini_calls = 0
+    seen_titles = set()
     tweet_posted = False
-    
+
     for entry in entries:
-        if entry["link"] in history:
+        if entry["link"] in history_set:
             continue
-        
+
+        # Aynı haber birden fazla feed'de yayınlanabiliyor; kotayı iki kez harcama.
+        title_key = entry["title"].strip().lower()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+
+        if gemini_calls >= MAX_GEMINI_CALLS_PER_RUN:
+            print(f"⛔ Gemini limit reached ({MAX_GEMINI_CALLS_PER_RUN} calls), stopping this run")
+            break
+
         print(f"📝 Checking item: {entry['title']}")
-        
-        # Generate tweet content (may return None if filtered)
         print("🤖 Analyzing with Gemini...")
-        tweet_text = generate_tweet(
-            entry["title"],
-            entry["summary"],
-            entry["source"],
-        )
-        
+        gemini_calls += 1
+        try:
+            tweet_text = generate_tweet(
+                gemini_client,
+                entry["title"],
+                entry["summary"],
+                entry["source"],
+            )
+        except Exception as e:
+            # Kota/servis hatası: turu temiz bitir ki biriken history commit edilebilsin.
+            print(f"⚠️ Gemini error, ending run: {e}")
+            break
+
         # Check if content was filtered
         if tweet_text is None:
             print("⏭️ Content filtered (not relevant), adding to history and trying next...")
             history.append(entry["link"])
+            history_set.add(entry["link"])
             save_history(history)
             continue
-        
+
         print(f"💬 Generated tweet: {tweet_text}")
-        
+
         # Post to Twitter
         print("🐦 Posting to Twitter...")
         try:
             response = post_to_twitter(tweet_text)
-            print(f"✅ Tweet posted successfully! ID: {response.data['id']}")
-            
-            # Save to history
-            history.append(entry["link"])
-            save_history(history)
-            print("💾 History updated")
-            tweet_posted = True
-            break  # Only post one tweet per run
-            
         except Exception as e:
+            # Görünür başarısızlık: 402 sessizce yutulduğu için 45 gün fark edilmemişti.
             print(f"❌ Error posting to Twitter: {e}")
-            return
-    
+            sys.exit(1)
+
+        print(f"✅ Tweet posted successfully! ID: {response.data['id']}")
+
+        # Save to history
+        history.append(entry["link"])
+        history_set.add(entry["link"])
+        save_history(history)
+        print("💾 History updated")
+        tweet_posted = True
+        break  # Only post one tweet per run
+
     if not tweet_posted:
         print("✅ No suitable items to post (all filtered or already posted)")
 

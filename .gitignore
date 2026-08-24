@@ -1,17 +1,4 @@
-# Environment variables
 .env
-
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-.Python
-venv/
+*.pyc
 .venv/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
