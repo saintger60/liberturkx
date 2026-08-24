@@ -39,9 +39,10 @@ HISTORY_FILE = "history.json"
 FEED_ITEMS_FILE = "feed_items.json"  # feed'in kaynak verisi (feed.xml bundan render edilir)
 FEED_XML_FILE = "feed.xml"
 FEED_MAX_ITEMS = 20
-# dlvr.it free plan ~10 post/ay geçiriyor; feed'i bundan hızlı doldurmak
-# aylık tavanı ilk günlerde tüketir. 72 saat aralık = ~10 post/ay.
-MIN_HOURS_BETWEEN_POSTS = 72
+# dlvr.it free plan 10 post/ay geçiriyor (panelden doğrulandı); feed'i bundan
+# hızlı doldurmak aylık tavanı erken tüketir. 75 saat aralık, 31 günlük ayların
+# takvim hizalanmasında bile ayda en fazla 10 post garantiler.
+MIN_HOURS_BETWEEN_POSTS = 75
 # Ücretsiz Gemini katmanı model başına günlük istekle sınırlı; tavan olmadan
 # tek tur tüm günlük kotayı tüketebilir.
 MAX_GEMINI_CALLS_PER_RUN = 3
