@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 LiberTurkX - Autonomous Tech News Bot
-Fetches tech/finance/crypto news and posts persona-driven commentary to Twitter.
+Fetches tech/finance/crypto news, generates persona-driven commentary with
+Gemini and publishes it to an RSS feed (feed.xml). dlvr.it watches the feed
+and cross-posts new items to X — X API'nin ücretli krediyle çalışan yazma
+ucu kullanılmıyor.
 """
 
 import json
@@ -10,9 +13,10 @@ import re
 import socket
 import sys
 from datetime import datetime, timezone
+from email.utils import format_datetime
+from xml.sax.saxutils import escape
 
 import feedparser
-import tweepy
 from dateutil import parser as date_parser
 from dotenv import load_dotenv
 from google import genai
@@ -21,11 +25,6 @@ from google.genai import types
 # Load environment variables
 load_dotenv()
 
-# API Configuration
-TWITTER_API_KEY = os.environ.get("TWITTER_API_KEY")
-TWITTER_API_SECRET = os.environ.get("TWITTER_API_SECRET")
-TWITTER_ACCESS_TOKEN = os.environ.get("TWITTER_ACCESS_TOKEN")
-TWITTER_ACCESS_SECRET = os.environ.get("TWITTER_ACCESS_SECRET")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # RSS Feed Sources
@@ -37,14 +36,24 @@ RSS_FEEDS = [
 ]
 
 HISTORY_FILE = "history.json"
-# Ücretsiz Gemini katmanı model başına günde 20 istekle sınırlı (Pasifik gece
-# yarısında sıfırlanır); tavan olmadan tek tur tüm günlük kotayı tüketebilir.
+FEED_ITEMS_FILE = "feed_items.json"  # feed'in kaynak verisi (feed.xml bundan render edilir)
+FEED_XML_FILE = "feed.xml"
+FEED_MAX_ITEMS = 20
+# dlvr.it free plan ~10 post/ay geçiriyor; feed'i bundan hızlı doldurmak
+# aylık tavanı ilk günlerde tüketir. 72 saat aralık = ~10 post/ay.
+MIN_HOURS_BETWEEN_POSTS = 72
+# Ücretsiz Gemini katmanı model başına günlük istekle sınırlı; tavan olmadan
+# tek tur tüm günlük kotayı tüketebilir.
 MAX_GEMINI_CALLS_PER_RUN = 3
 HISTORY_MAX_ENTRIES = 1000
 # Preview modeller 2 hafta bildirimle emekli edilebiliyor; stable modelde kal.
 GEMINI_MODEL = "gemini-3.5-flash"
 TWEET_MAX_CHARS = 270
 FEED_TIMEOUT_SECONDS = 20
+
+FEED_TITLE = "Liber Turk"
+FEED_LINK = "https://x.com/liberturkx"
+FEED_DESCRIPTION = "eski usül istihbarat bitti, yeni cephe veri madenciliği."
 
 # Persona System Prompt
 PERSONA_PROMPT = """Sen 'Liber Turk'sun. Dijital bir istihbarat subayısın (Teşkilat-ı Mahsusa ruhuyla).
@@ -103,6 +112,63 @@ def save_history(history):
     trimmed = history[-HISTORY_MAX_ENTRIES:]
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(trimmed, f, ensure_ascii=False, indent=2)
+
+
+def load_feed_items():
+    """Load published feed items (newest last)."""
+    if os.path.exists(FEED_ITEMS_FILE):
+        with open(FEED_ITEMS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def hours_since_last_feed_item(feed_items, now):
+    """Return hours elapsed since the newest feed item, or None if feed is empty."""
+    if not feed_items:
+        return None
+    last = date_parser.parse(feed_items[-1]["published_at"])
+    return (now - last).total_seconds() / 3600
+
+
+def render_feed_xml(feed_items):
+    """Render feed items (newest last) into an RSS 2.0 document, newest first."""
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0">',
+        "<channel>",
+        f"<title>{escape(FEED_TITLE)}</title>",
+        f"<link>{escape(FEED_LINK)}</link>",
+        f"<description>{escape(FEED_DESCRIPTION)}</description>",
+        "<language>tr</language>",
+    ]
+    for item in reversed(feed_items):
+        pub_date = format_datetime(date_parser.parse(item["published_at"]))
+        lines += [
+            "<item>",
+            f"<title>{escape(item['text'])}</title>",
+            f"<description>{escape(item['text'])}</description>",
+            f"<link>{escape(item['news_link'])}</link>",
+            f"<guid isPermaLink=\"false\">{escape(item['news_link'])}</guid>",
+            f"<pubDate>{pub_date}</pubDate>",
+            "</item>",
+        ]
+    lines += ["</channel>", "</rss>"]
+    return "\n".join(lines) + "\n"
+
+
+def publish_to_feed(feed_items, tweet_text, news_link, now):
+    """Append a new item, prune old ones and write both feed files."""
+    feed_items.append({
+        "text": tweet_text,
+        "news_link": news_link,
+        "published_at": now.isoformat(),
+    })
+    feed_items = feed_items[-FEED_MAX_ITEMS:]
+    with open(FEED_ITEMS_FILE, "w", encoding="utf-8") as f:
+        json.dump(feed_items, f, ensure_ascii=False, indent=2)
+    with open(FEED_XML_FILE, "w", encoding="utf-8") as f:
+        f.write(render_feed_xml(feed_items))
+    return feed_items
 
 
 def parse_entry_date(entry):
@@ -195,36 +261,25 @@ KAYNAK: {source}
     return postprocess_tweet(response.text)
 
 
-def post_to_twitter(tweet_text):
-    """Post tweet to Twitter using API v2."""
-    client = tweepy.Client(
-        consumer_key=TWITTER_API_KEY,
-        consumer_secret=TWITTER_API_SECRET,
-        access_token=TWITTER_ACCESS_TOKEN,
-        access_token_secret=TWITTER_ACCESS_SECRET,
-    )
-
-    response = client.create_tweet(text=tweet_text)
-    return response
-
-
 def main():
     """Main bot logic."""
     print("🚀 LiberTurkX Bot Starting...")
 
-    # Validate API keys
-    required_keys = [
-        ("TWITTER_API_KEY", TWITTER_API_KEY),
-        ("TWITTER_API_SECRET", TWITTER_API_SECRET),
-        ("TWITTER_ACCESS_TOKEN", TWITTER_ACCESS_TOKEN),
-        ("TWITTER_ACCESS_SECRET", TWITTER_ACCESS_SECRET),
-        ("GEMINI_API_KEY", GEMINI_API_KEY),
-    ]
-
-    missing = [name for name, value in required_keys if not value]
-    if missing:
-        print(f"❌ Missing environment variables: {', '.join(missing)}")
+    if not GEMINI_API_KEY:
+        print("❌ Missing environment variable: GEMINI_API_KEY")
         sys.exit(1)
+
+    now = datetime.now(timezone.utc)
+
+    # Pacing kapısı: dlvr.it free planı ~10 post/ay geçiriyor. Pencere
+    # kapalıyken RSS ve Gemini'ye hiç dokunmadan çık — kota harcanmasın.
+    feed_items = load_feed_items()
+    elapsed = hours_since_last_feed_item(feed_items, now)
+    if elapsed is not None and elapsed < MIN_HOURS_BETWEEN_POSTS:
+        remaining = MIN_HOURS_BETWEEN_POSTS - elapsed
+        print(f"⏳ Pacing window closed ({elapsed:.1f}h since last post, "
+              f"{remaining:.1f}h remaining) — skipping run")
+        return
 
     # Load history
     history = load_history()
@@ -243,7 +298,7 @@ def main():
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     gemini_calls = 0
     seen_titles = set()
-    tweet_posted = False
+    queued = False
 
     for entry in entries:
         if entry["link"] in history_set:
@@ -284,27 +339,19 @@ def main():
 
         print(f"💬 Generated tweet: {tweet_text}")
 
-        # Post to Twitter
-        print("🐦 Posting to Twitter...")
-        try:
-            response = post_to_twitter(tweet_text)
-        except Exception as e:
-            # Görünür başarısızlık: 402 sessizce yutulduğu için 45 gün fark edilmemişti.
-            print(f"❌ Error posting to Twitter: {e}")
-            sys.exit(1)
+        # Feed'e yaz; dlvr.it feed'i izleyip X'e basacak.
+        print("📤 Publishing to RSS feed...")
+        publish_to_feed(feed_items, tweet_text, entry["link"], now)
 
-        print(f"✅ Tweet posted successfully! ID: {response.data['id']}")
-
-        # Save to history
         history.append(entry["link"])
         history_set.add(entry["link"])
         save_history(history)
-        print("💾 History updated")
-        tweet_posted = True
-        break  # Only post one tweet per run
+        print("✅ Queued for X via dlvr.it, history updated")
+        queued = True
+        break  # Pencere başına tek post
 
-    if not tweet_posted:
-        print("✅ No suitable items to post (all filtered or already posted)")
+    if not queued:
+        print("✅ No suitable items to queue (all filtered or already posted)")
 
 
 if __name__ == "__main__":
